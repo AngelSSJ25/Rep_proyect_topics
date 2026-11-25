@@ -1,0 +1,335 @@
+
+-- ============================================================
+-- SMART STORE DATA WAREHOUSE
+-- 10 - SQL AVANZADO Y ANALISIS DE OPTIMIZACION
+-- ============================================================
+
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE WH_SMART_ANALYTICS;
+USE DATABASE SMART_STORE_DW;
+USE SCHEMA ANALYTICS;
+
+
+-- ============================================================
+-- CONSULTA 1
+-- RANKING DE PRODUCTOS POR CATEGORIA
+-- CTE + AGREGACIONES + FUNCIONES DE VENTANA
+-- ============================================================
+
+CREATE OR REPLACE VIEW ANALYTICS.V_RANKING_PRODUCTOS AS
+
+WITH VENTAS_ENTREGADAS AS (
+
+    SELECT
+        V.PRODUCTO_KEY,
+        V.PEDIDO_ID,
+        V.CANTIDAD,
+        V.INGRESO_REALIZADO,
+        V.MARGEN_REALIZADO
+
+    FROM DW.FACT_VENTAS V
+    WHERE V.ESTADO_PEDIDO = 'ENTREGADO'
+
+),
+
+RESUMEN_PRODUCTO AS (
+
+    SELECT
+        P.PRODUCTO_KEY,
+        P.SKU,
+        P.PRODUCTO,
+        P.CATEGORIA,
+
+        COUNT(DISTINCT V.PEDIDO_ID)
+            AS PEDIDOS_ENTREGADOS,
+
+        COALESCE(SUM(V.CANTIDAD), 0)
+            AS UNIDADES_VENDIDAS,
+
+        COALESCE(SUM(V.INGRESO_REALIZADO), 0)
+            AS INGRESOS,
+
+        COALESCE(SUM(V.MARGEN_REALIZADO), 0)
+            AS MARGEN_BRUTO
+
+    FROM DW.DIM_PRODUCTO P
+
+    LEFT JOIN VENTAS_ENTREGADAS V
+        ON P.PRODUCTO_KEY = V.PRODUCTO_KEY
+
+    GROUP BY
+        P.PRODUCTO_KEY,
+        P.SKU,
+        P.PRODUCTO,
+        P.CATEGORIA
+
+),
+
+RANKING AS (
+
+    SELECT
+        *,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY CATEGORIA
+            ORDER BY
+                INGRESOS DESC,
+                SKU
+        ) AS POSICION_CATEGORIA,
+
+        ROUND(
+            100.0 * INGRESOS /
+            NULLIF(
+                SUM(INGRESOS) OVER (
+                    PARTITION BY CATEGORIA
+                ),
+                0
+            ),
+            2
+        ) AS PARTICIPACION_CATEGORIA_PCT
+
+    FROM RESUMEN_PRODUCTO
+
+)
+
+SELECT *
+FROM RANKING;
+
+
+-- ============================================================
+-- CONSULTA 2
+-- INDICADORES MENSUALES AVANZADOS
+-- FUNCIONES LAG Y SUM OVER
+-- ============================================================
+
+CREATE OR REPLACE VIEW ANALYTICS.V_KPIS_MENSUALES AS
+
+WITH BASE AS (
+
+    SELECT
+        PERIODO,
+        PEDIDOS_TOTALES,
+        PEDIDOS_ENTREGADOS,
+        INGRESOS,
+        COSTOS,
+        MARGEN_BRUTO
+
+    FROM ANALYTICS.V_VENTAS_MENSUALES
+
+),
+
+CALCULOS AS (
+
+    SELECT
+        *,
+
+        LAG(INGRESOS) OVER (
+            ORDER BY PERIODO
+        ) AS INGRESOS_MES_ANTERIOR,
+
+        SUM(INGRESOS) OVER (
+            ORDER BY PERIODO
+            ROWS BETWEEN UNBOUNDED PRECEDING
+                AND CURRENT ROW
+        ) AS INGRESOS_ACUMULADOS
+
+    FROM BASE
+
+)
+
+SELECT
+    PERIODO,
+    PEDIDOS_TOTALES,
+    PEDIDOS_ENTREGADOS,
+    INGRESOS,
+    COSTOS,
+    MARGEN_BRUTO,
+    INGRESOS_MES_ANTERIOR,
+    INGRESOS_ACUMULADOS,
+
+    ROUND(
+        100.0 * (
+            INGRESOS - INGRESOS_MES_ANTERIOR
+        ) / NULLIF(INGRESOS_MES_ANTERIOR, 0),
+        2
+    ) AS CRECIMIENTO_MENSUAL_PCT,
+
+    ROUND(
+        100.0 * MARGEN_BRUTO /
+        NULLIF(INGRESOS, 0),
+        2
+    ) AS MARGEN_PCT,
+
+    ROUND(
+        INGRESOS /
+        NULLIF(PEDIDOS_ENTREGADOS, 0),
+        2
+    ) AS TICKET_PROMEDIO_PRODUCTOS
+
+FROM CALCULOS;
+
+
+-- ============================================================
+-- CONSULTA 3
+-- TRAZABILIDAD OPERATIVA E IOT
+-- AGREGACIONES CONDICIONALES
+-- ============================================================
+
+CREATE OR REPLACE VIEW ANALYTICS.V_EFICIENCIA_ALMACEN AS
+
+SELECT
+    A.ALMACEN_KEY,
+    A.ALMACEN,
+
+    COUNT(*) AS MOVIMIENTOS_TOTALES,
+
+    COUNT_IF(M.TIPO_MOVIMIENTO = 'RECEPCION')
+        AS RECEPCIONES,
+
+    COUNT_IF(M.TIPO_MOVIMIENTO = 'PICKING')
+        AS OPERACIONES_PICKING,
+
+    COUNT_IF(M.TIPO_MOVIMIENTO = 'DESPACHO')
+        AS DESPACHOS,
+
+    COALESCE(
+        SUM(
+            CASE
+                WHEN M.TIPO_MOVIMIENTO = 'RECEPCION'
+                THEN M.CANTIDAD
+                ELSE 0
+            END
+        ), 0
+    ) AS UNIDADES_RECIBIDAS,
+
+    COALESCE(
+        SUM(
+            CASE
+                WHEN M.TIPO_MOVIMIENTO = 'DESPACHO'
+                THEN M.CANTIDAD
+                ELSE 0
+            END
+        ), 0
+    ) AS UNIDADES_DESPACHADAS,
+
+    COUNT(M.EVENTO_IOT_ID)
+        AS EVENTOS_ASOCIADOS,
+
+    ROUND(
+        100.0 * COUNT(M.EVENTO_IOT_ID)
+        / NULLIF(COUNT(*), 0),
+        2
+    ) AS COBERTURA_IOT_PCT
+
+FROM DW.FACT_MOVIMIENTOS M
+
+JOIN DW.DIM_ALMACEN A
+    ON M.ALMACEN_KEY = A.ALMACEN_KEY
+
+GROUP BY
+    A.ALMACEN_KEY,
+    A.ALMACEN;
+
+
+-- ============================================================
+-- CONSULTA 4
+-- PERFIL DE RENDIMIENTO: CONSULTA BASE
+-- ============================================================
+
+ALTER SESSION SET USE_CACHED_RESULT = FALSE;
+
+ALTER SESSION SET QUERY_TAG =
+    'SMART_STORE_OPT_BASE';
+
+SELECT
+    P.CATEGORIA,
+    COUNT(DISTINCT V.PEDIDO_ID)
+        AS PEDIDOS_ENTREGADOS,
+    SUM(V.CANTIDAD) AS UNIDADES,
+    SUM(V.INGRESO_REALIZADO) AS INGRESOS
+
+FROM DW.FACT_VENTAS V
+
+JOIN DW.DIM_PRODUCTO P
+    ON V.PRODUCTO_KEY = P.PRODUCTO_KEY
+
+WHERE V.ESTADO_PEDIDO = 'ENTREGADO'
+
+GROUP BY P.CATEGORIA
+ORDER BY INGRESOS DESC;
+
+
+-- ============================================================
+-- CONSULTA 5
+-- PERFIL DE RENDIMIENTO: CONSULTA ALTERNATIVA
+-- FILTRO Y AGRUPACION PREVIA
+-- ============================================================
+
+ALTER SESSION SET QUERY_TAG =
+    'SMART_STORE_OPT_ALTERNATIVA';
+
+WITH VENTAS_FILTRADAS AS (
+
+    SELECT
+        PRODUCTO_KEY,
+        PEDIDO_ID,
+        CANTIDAD,
+        INGRESO_REALIZADO
+
+    FROM DW.FACT_VENTAS
+
+    WHERE ESTADO_PEDIDO = 'ENTREGADO'
+
+),
+
+PRODUCTOS_AGRUPADOS AS (
+
+    SELECT
+        PRODUCTO_KEY,
+        COUNT(DISTINCT PEDIDO_ID)
+            AS PEDIDOS_PRODUCTO,
+        SUM(CANTIDAD) AS UNIDADES,
+        SUM(INGRESO_REALIZADO) AS INGRESOS
+
+    FROM VENTAS_FILTRADAS
+    GROUP BY PRODUCTO_KEY
+
+)
+
+SELECT
+    P.CATEGORIA,
+    SUM(A.UNIDADES) AS UNIDADES,
+    SUM(A.INGRESOS) AS INGRESOS,
+    SUM(A.PEDIDOS_PRODUCTO)
+        AS PEDIDOS_POR_PRODUCTO
+
+FROM PRODUCTOS_AGRUPADOS A
+
+JOIN DW.DIM_PRODUCTO P
+    ON A.PRODUCTO_KEY = P.PRODUCTO_KEY
+
+GROUP BY P.CATEGORIA
+ORDER BY INGRESOS DESC;
+
+
+-- ============================================================
+-- RESTAURAR CONFIGURACION DE SESION
+-- ============================================================
+
+ALTER SESSION UNSET QUERY_TAG;
+ALTER SESSION UNSET USE_CACHED_RESULT;
+
+
+-- ============================================================
+-- RESULTADO FINAL: KPIS MENSUALES
+-- ============================================================
+
+SELECT
+    PERIODO,
+    PEDIDOS_TOTALES,
+    INGRESOS,
+    MARGEN_PCT,
+    CRECIMIENTO_MENSUAL_PCT,
+    INGRESOS_ACUMULADOS
+FROM ANALYTICS.V_KPIS_MENSUALES
+ORDER BY PERIODO;

@@ -1,0 +1,55 @@
+-- SMART STORE - PRUEBA CONTROLADA DE CLUSTERING KEYS
+-- EJECUCION UNICA EN SNOWFLAKE. No afecta a DW.FACT_MOVIMIENTOS.
+-- La tabla es pequena: no afirmar mejoras de rendimiento sin observarlas.
+
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE WH_SMART_ANALYTICS;
+USE DATABASE SMART_STORE_DW;
+
+-- Copia independiente para la practica de optimizacion.
+CREATE TABLE IF NOT EXISTS RESILIENCE.FACT_MOVIMIENTOS_CLUSTER_DEMO
+CLONE DW.FACT_MOVIMIENTOS;
+
+-- Requisito explicito de la rubrica: aplicar una clave de clustering.
+ALTER TABLE RESILIENCE.FACT_MOVIMIENTOS_CLUSTER_DEMO
+CLUSTER BY (FECHA_KEY);
+
+-- Consultar metadatos de clustering despues de definir la clave.
+SELECT SYSTEM$CLUSTERING_INFORMATION(
+    'SMART_STORE_DW.RESILIENCE.FACT_MOVIMIENTOS_CLUSTER_DEMO'
+) AS INFORMACION_CLUSTERING;
+
+-- Evitar mantenimiento automatico innecesario de la copia academica.
+ALTER TABLE RESILIENCE.FACT_MOVIMIENTOS_CLUSTER_DEMO
+SUSPEND RECLUSTER;
+
+-- Comparacion con las mismas operaciones y filtro; resultados deben coincidir.
+ALTER SESSION SET USE_CACHED_RESULT = FALSE;
+ALTER SESSION SET QUERY_TAG = 'SMARTSTORE_CLUSTER_BASE';
+SELECT
+    FECHA_KEY,
+    COUNT(*) AS MOVIMIENTOS,
+    SUM(CANTIDAD) AS UNIDADES
+FROM DW.FACT_MOVIMIENTOS
+WHERE FECHA_KEY BETWEEN 20260301 AND 20260331
+GROUP BY FECHA_KEY
+ORDER BY FECHA_KEY;
+
+ALTER SESSION SET QUERY_TAG = 'SMARTSTORE_CLUSTER_COPIA';
+SELECT
+    FECHA_KEY,
+    COUNT(*) AS MOVIMIENTOS,
+    SUM(CANTIDAD) AS UNIDADES
+FROM RESILIENCE.FACT_MOVIMIENTOS_CLUSTER_DEMO
+WHERE FECHA_KEY BETWEEN 20260301 AND 20260331
+GROUP BY FECHA_KEY
+ORDER BY FECHA_KEY;
+
+ALTER SESSION UNSET QUERY_TAG;
+ALTER SESSION UNSET USE_CACHED_RESULT;
+
+-- En Query History revisar las dos consultas SELECT:
+-- particiones escaneadas, bytes, cache, operadores y duracion.
+-- La definicion de CLUSTER BY no garantiza menos Full Table Scans
+-- con solo 6109 registros ni hace automaticamente fisicamente
+-- reordenados los datos del clon si se suspende el reclustering.

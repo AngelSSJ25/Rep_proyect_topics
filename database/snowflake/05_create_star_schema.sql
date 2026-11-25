@@ -1,0 +1,324 @@
+
+-- ============================================================
+-- SMART STORE DATA WAREHOUSE
+-- 05 - CREACION Y CARGA DEL ESQUEMA ESTRELLA
+-- ============================================================
+
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE WH_SMART_ETL;
+USE DATABASE SMART_STORE_DW;
+USE SCHEMA DW;
+
+
+-- ============================================================
+-- DIMENSION 1: FECHA
+-- Calendario para analisis historico
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.DIM_FECHA AS
+WITH CALENDARIO AS (
+    SELECT
+        DATEADD(
+            DAY,
+            ROW_NUMBER() OVER (ORDER BY SEQ4()) - 1,
+            '2025-01-01'::DATE
+        )::DATE AS FECHA
+    FROM TABLE(GENERATOR(ROWCOUNT => 1095))
+)
+SELECT
+    TO_NUMBER(TO_CHAR(FECHA, 'YYYYMMDD')) AS FECHA_KEY,
+    FECHA,
+    YEAR(FECHA) AS ANIO,
+    QUARTER(FECHA) AS TRIMESTRE,
+    MONTH(FECHA) AS MES,
+    MONTHNAME(FECHA) AS NOMBRE_MES,
+    DAY(FECHA) AS DIA,
+    DAYOFWEEKISO(FECHA) AS DIA_SEMANA,
+    DAYNAME(FECHA) AS NOMBRE_DIA,
+    WEEKISO(FECHA) AS SEMANA_ANIO
+FROM CALENDARIO;
+
+
+-- ============================================================
+-- DIMENSION 2: PRODUCTO
+-- Incluye categoria y datos comerciales
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.DIM_PRODUCTO AS
+SELECT
+    P.PRODUCTO_ID AS PRODUCTO_KEY,
+    P.PRODUCTO_ID,
+    P.SKU,
+    P.CODIGO_BARRAS,
+    P.NOMBRE AS PRODUCTO,
+    P.MARCA,
+    P.CATEGORIA_ID,
+    C.NOMBRE AS CATEGORIA,
+    P.PRECIO_VENTA AS PRECIO_ACTUAL,
+    P.COSTO_UNITARIO AS COSTO_ACTUAL,
+    P.STOCK_MINIMO,
+    P.ACTIVO
+FROM STAGING.V_PRODUCTOS P
+LEFT JOIN STAGING.V_CATEGORIAS C
+    ON P.CATEGORIA_ID = C.CATEGORIA_ID;
+
+
+-- ============================================================
+-- DIMENSION 3: CLIENTE
+-- Informacion geografica y comercial
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.DIM_CLIENTE AS
+SELECT
+    CLIENTE_ID AS CLIENTE_KEY,
+    CLIENTE_ID,
+    NOMBRE,
+    APELLIDO,
+    CIUDAD,
+    ESTADO,
+    PAIS,
+    ACTIVO,
+    FECHA_REGISTRO
+FROM STAGING.V_CLIENTES;
+
+
+-- ============================================================
+-- DIMENSION 4: ALMACEN
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.DIM_ALMACEN AS
+SELECT
+    ALMACEN_ID AS ALMACEN_KEY,
+    ALMACEN_ID,
+    CODIGO,
+    NOMBRE AS ALMACEN,
+    CIUDAD,
+    ESTADO,
+    CAPACIDAD_UNIDADES,
+    ACTIVO
+FROM STAGING.V_ALMACENES;
+
+
+-- ============================================================
+-- DIMENSION 5: UBICACION
+-- Incluye el almacen al que pertenece
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.DIM_UBICACION AS
+SELECT
+    U.UBICACION_ID AS UBICACION_KEY,
+    U.UBICACION_ID,
+    U.ALMACEN_ID,
+    A.CODIGO AS CODIGO_ALMACEN,
+    U.CODIGO AS CODIGO_UBICACION,
+    U.ZONA,
+    U.PASILLO,
+    U.ESTANTE,
+    U.NIVEL,
+    U.CAPACIDAD,
+    U.ACTIVO
+FROM STAGING.V_UBICACIONES U
+LEFT JOIN STAGING.V_ALMACENES A
+    ON U.ALMACEN_ID = A.ALMACEN_ID;
+
+
+-- ============================================================
+-- DIMENSION 6: DISPOSITIVO IOT
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.DIM_DISPOSITIVO AS
+SELECT
+    D.DISPOSITIVO_ID AS DISPOSITIVO_KEY,
+    D.DISPOSITIVO_ID,
+    D.CODIGO,
+    D.NOMBRE AS DISPOSITIVO,
+    D.TIPO,
+    D.ALMACEN_ID,
+    A.CODIGO AS CODIGO_ALMACEN,
+    D.UBICACION_ID,
+    D.ACTIVO
+FROM STAGING.V_DISPOSITIVOS D
+LEFT JOIN STAGING.V_ALMACENES A
+    ON D.ALMACEN_ID = A.ALMACEN_ID;
+
+
+-- ============================================================
+-- HECHOS 1: VENTAS
+-- Granularidad: una fila por detalle de pedido
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.FACT_VENTAS AS
+SELECT
+    D.DETALLE_ID AS VENTA_KEY,
+    D.DETALLE_ID,
+    D.PEDIDO_ID,
+    P.NUMERO_PEDIDO,
+
+    TO_NUMBER(
+        TO_CHAR(P.FECHA_PEDIDO::DATE, 'YYYYMMDD')
+    ) AS FECHA_KEY,
+
+    P.FECHA_PEDIDO,
+    P.CLIENTE_ID AS CLIENTE_KEY,
+    D.PRODUCTO_ID AS PRODUCTO_KEY,
+
+    P.ESTADO AS ESTADO_PEDIDO,
+    P.METODO_PAGO,
+    P.MONEDA,
+
+    D.CANTIDAD,
+    D.PRECIO_UNITARIO,
+    D.COSTO_UNITARIO,
+    D.DESCUENTO,
+
+    (D.CANTIDAD * D.PRECIO_UNITARIO)
+        AS IMPORTE_BRUTO,
+
+    D.SUBTOTAL AS IMPORTE_PEDIDO,
+
+    (D.CANTIDAD * D.COSTO_UNITARIO)
+        AS COSTO_MERCANCIA,
+
+    CASE
+        WHEN P.ESTADO = 'ENTREGADO'
+        THEN D.SUBTOTAL
+        ELSE 0
+    END AS INGRESO_REALIZADO,
+
+    CASE
+        WHEN P.ESTADO = 'ENTREGADO'
+        THEN
+            D.SUBTOTAL -
+            (D.CANTIDAD * D.COSTO_UNITARIO)
+        ELSE 0
+    END AS MARGEN_REALIZADO
+
+FROM STAGING.V_DETALLE_PEDIDOS D
+INNER JOIN STAGING.V_PEDIDOS P
+    ON D.PEDIDO_ID = P.PEDIDO_ID;
+
+
+-- ============================================================
+-- HECHOS 2: MOVIMIENTOS DE INVENTARIO
+-- Granularidad: un movimiento operativo
+-- Incluye clasificacion del evento IoT
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.FACT_MOVIMIENTOS AS
+SELECT
+    M.MOVIMIENTO_ID AS MOVIMIENTO_KEY,
+    M.MOVIMIENTO_ID,
+    M.PEDIDO_ID,
+
+    TO_NUMBER(
+        TO_CHAR(M.FECHA_MOVIMIENTO::DATE, 'YYYYMMDD')
+    ) AS FECHA_KEY,
+
+    M.FECHA_MOVIMIENTO,
+    M.PRODUCTO_ID AS PRODUCTO_KEY,
+
+    M.DISPOSITIVO_ID AS DISPOSITIVO_KEY,
+
+    COALESCE(
+        UO.ALMACEN_ID,
+        UD.ALMACEN_ID
+    ) AS ALMACEN_KEY,
+
+    M.UBICACION_ORIGEN_ID AS UBICACION_ORIGEN_KEY,
+    M.UBICACION_DESTINO_ID AS UBICACION_DESTINO_KEY,
+
+    M.TIPO_MOVIMIENTO,
+    M.CANTIDAD,
+    M.REFERENCIA_EVENTO,
+
+    I.EVENT_ID AS EVENTO_IOT_ID,
+    I.TIPO_EVENTO AS TIPO_EVENTO_IOT,
+    I.CLASIFICACION AS CLASIFICACION_IOT,
+    I.CODIGO_DISPOSITIVO,
+    I.ESTADO AS ESTADO_EVENTO_IOT,
+
+    CASE
+        WHEN M.TIPO_MOVIMIENTO IN (
+            'RECEPCION', 'DEVOLUCION'
+        )
+        THEN M.CANTIDAD
+        ELSE 0
+    END AS UNIDADES_ENTRADA,
+
+    CASE
+        WHEN M.TIPO_MOVIMIENTO = 'DESPACHO'
+        THEN M.CANTIDAD
+        ELSE 0
+    END AS UNIDADES_SALIDA
+
+FROM STAGING.V_MOVIMIENTOS M
+
+LEFT JOIN STAGING.V_UBICACIONES UO
+    ON M.UBICACION_ORIGEN_ID = UO.UBICACION_ID
+
+LEFT JOIN STAGING.V_UBICACIONES UD
+    ON M.UBICACION_DESTINO_ID = UD.UBICACION_ID
+
+LEFT JOIN STAGING.V_EVENTOS_IOT I
+    ON M.MOVIMIENTO_ID = I.MOVIMIENTO_ID;
+
+
+-- ============================================================
+-- TABLA ANALITICA COMPLEMENTARIA:
+-- ESTADO ACTUAL DE INVENTARIO
+-- No representa movimientos historicos
+-- ============================================================
+
+CREATE OR REPLACE TABLE DW.FACT_INVENTARIO_ACTUAL AS
+SELECT
+    I.INVENTARIO_ID,
+    I.PRODUCTO_ID AS PRODUCTO_KEY,
+    I.UBICACION_ID AS UBICACION_KEY,
+    U.ALMACEN_ID AS ALMACEN_KEY,
+
+    I.STOCK_FISICO,
+    I.STOCK_RESERVADO,
+    I.STOCK_DISPONIBLE,
+    I.ACTUALIZADO_EN
+
+FROM STAGING.V_INVENTARIOS I
+LEFT JOIN STAGING.V_UBICACIONES U
+    ON I.UBICACION_ID = U.UBICACION_ID;
+
+
+-- ============================================================
+-- RESUMEN DE CARGA
+-- ============================================================
+
+SELECT
+    'DIM_FECHA' AS TABLA,
+    COUNT(*) AS REGISTROS
+FROM DW.DIM_FECHA
+
+UNION ALL
+SELECT 'DIM_PRODUCTO', COUNT(*) FROM DW.DIM_PRODUCTO
+
+UNION ALL
+SELECT 'DIM_CLIENTE', COUNT(*) FROM DW.DIM_CLIENTE
+
+UNION ALL
+SELECT 'DIM_ALMACEN', COUNT(*) FROM DW.DIM_ALMACEN
+
+UNION ALL
+SELECT 'DIM_UBICACION', COUNT(*) FROM DW.DIM_UBICACION
+
+UNION ALL
+SELECT 'DIM_DISPOSITIVO', COUNT(*) FROM DW.DIM_DISPOSITIVO
+
+UNION ALL
+SELECT 'FACT_VENTAS', COUNT(*) FROM DW.FACT_VENTAS
+
+UNION ALL
+SELECT 'FACT_MOVIMIENTOS', COUNT(*)
+FROM DW.FACT_MOVIMIENTOS
+
+UNION ALL
+SELECT 'FACT_INVENTARIO_ACTUAL', COUNT(*)
+FROM DW.FACT_INVENTARIO_ACTUAL
+
+ORDER BY TABLA;

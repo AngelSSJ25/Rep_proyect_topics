@@ -1,0 +1,54 @@
+
+# Entorno virtual de Python
+.venv/
+venv/
+env/
+
+# Credenciales y configuracion privada
+.env
+.env.*
+!.env.example
+
+# Archivos temporales de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Registros temporales
+*.log
+
+# Archivos temporales de editores
+*.swp
+*.swo
+# Credenciales
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*.key
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Temporales
+*.log
+.DS_Store
+Thumbs.db
+
